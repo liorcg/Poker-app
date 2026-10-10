@@ -61,6 +61,7 @@ class _GameScreenState extends State<GameScreen> {
   final List<Player> _players = [];
   int _defaultBuyIn = 100;
   int _startingMoney = 1000;
+  int _round = 1;
 
   int get _pot => _players.fold(0, (s, p) => s + p.buyIn);
 
@@ -78,6 +79,7 @@ class _GameScreenState extends State<GameScreen> {
     setState(() {
       _defaultBuyIn = data['defaultBuyIn'] as int? ?? 100;
       _startingMoney = data['startingMoney'] as int? ?? 1000;
+      _round = data['round'] as int? ?? 1;
       _players
         ..clear()
         ..addAll((data['players'] as List)
@@ -93,6 +95,7 @@ class _GameScreenState extends State<GameScreen> {
         jsonEncode({
           'defaultBuyIn': _defaultBuyIn,
           'startingMoney': _startingMoney,
+          'round': _round,
           'players': _players.map((p) => p.toJson()).toList(),
         }));
   }
@@ -235,6 +238,7 @@ class _GameScreenState extends State<GameScreen> {
         p.buyIn = _defaultBuyIn;
         p.cashOut = null;
       }
+      _round++;
     });
   }
 
@@ -258,6 +262,7 @@ class _GameScreenState extends State<GameScreen> {
     );
     if (ok == null) return;
     _update(() {
+      _round = 1;
       if (ok) {
         for (final p in _players) {
           p.buyIn = _defaultBuyIn;
@@ -301,6 +306,11 @@ class _GameScreenState extends State<GameScreen> {
               color: scheme.primaryContainer,
               borderRadius: BorderRadius.circular(20)),
           child: Column(children: [
+            Text('Round $_round',
+                style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onPrimaryContainer)),
             Text('Total in the pot',
                 style: TextStyle(color: scheme.onPrimaryContainer)),
             Text('$_pot',
@@ -363,6 +373,7 @@ class _GameScreenState extends State<GameScreen> {
                               MaterialPageRoute(
                                   builder: (_) => SettleScreen(
                                       players: _players,
+                                      round: _round,
                                       onChanged: _save,
                                       onFinish: _finishRound)));
                           setState(() {});
@@ -383,10 +394,12 @@ class SettleScreen extends StatefulWidget {
   final List<Player> players;
   final VoidCallback onChanged;
   final VoidCallback onFinish;
+  final int round;
 
   const SettleScreen(
       {super.key,
       required this.players,
+      required this.round,
       required this.onChanged,
       required this.onFinish});
 
@@ -421,9 +434,11 @@ class _SettleScreenState extends State<SettleScreen> {
         : <Transfer>[];
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settle up')),
+      appBar: AppBar(title: Text('Settle up · Round ${widget.round}')),
       body: ListView(padding: const EdgeInsets.all(16), children: [
-        const Text('Enter how many chips each player has at the end.',
+        const Text(
+            'Tap Win for the player who took the whole pot, '
+            'or enter how many chips each player has at the end.',
             style: TextStyle(fontSize: 16)),
         const SizedBox(height: 12),
         for (final p in players)
@@ -453,6 +468,11 @@ class _SettleScreenState extends State<SettleScreen> {
                     widget.onChanged();
                   },
                 ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(
+                onPressed: () => _win(p),
+                child: const Text('Win'),
               ),
             ]),
           ),
@@ -486,7 +506,7 @@ class _SettleScreenState extends State<SettleScreen> {
               ),
             ),
           const SizedBox(height: 16),
-          Text('Money after this game',
+          Text('Money after this round',
               style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
           for (final p in players)
@@ -502,21 +522,33 @@ class _SettleScreenState extends State<SettleScreen> {
           FilledButton.icon(
             onPressed: () => _confirmFinish(context),
             icon: const Icon(Icons.check),
-            label: const Text('Finish game & update money'),
+            label: Text('Finish round ${widget.round} & update money'),
           ),
         ],
       ]),
     );
   }
 
+  /// Gives the whole pot to [winner]; everyone else ends with nothing.
+  void _win(Player winner) {
+    final pot = widget.players.fold(0, (s, p) => s + p.buyIn);
+    setState(() {
+      for (final p in widget.players) {
+        p.cashOut = identical(p, winner) ? pot : 0;
+        _ctrls[p]!.text = '${p.cashOut}';
+      }
+    });
+    widget.onChanged();
+  }
+
   Future<void> _confirmFinish(BuildContext context) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Finish this game?'),
+        title: Text('Finish round ${widget.round}?'),
         content: const Text(
             'Wins are added and losses are taken from each player\'s money. '
-            'Buy-ins reset for the next game.'),
+            'Buy-ins reset for the next round.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
