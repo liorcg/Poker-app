@@ -1,0 +1,432 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'settlement.dart';
+
+void main() => runApp(const PokerApp());
+
+class PokerApp extends StatelessWidget {
+  const PokerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Poker Night',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0B6E3A),
+          brightness: Brightness.dark,
+        ),
+        useMaterial3: true,
+      ),
+      home: const GameScreen(),
+    );
+  }
+}
+
+class Player {
+  String name;
+  int buyIn;
+  int? cashOut;
+
+  Player(this.name, {this.buyIn = 0, this.cashOut});
+
+  Map<String, dynamic> toJson() =>
+      {'name': name, 'buyIn': buyIn, 'cashOut': cashOut};
+
+  factory Player.fromJson(Map<String, dynamic> j) =>
+      Player(j['name'] as String,
+          buyIn: j['buyIn'] as int, cashOut: j['cashOut'] as int?);
+}
+
+const _storeKey = 'game_v1';
+
+class GameScreen extends StatefulWidget {
+  const GameScreen({super.key});
+
+  @override
+  State<GameScreen> createState() => _GameScreenState();
+}
+
+class _GameScreenState extends State<GameScreen> {
+  final List<Player> _players = [];
+  int _defaultBuyIn = 100;
+
+  int get _pot => _players.fold(0, (s, p) => s + p.buyIn);
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_storeKey);
+    if (raw == null) return;
+    final data = jsonDecode(raw) as Map<String, dynamic>;
+    setState(() {
+      _defaultBuyIn = data['defaultBuyIn'] as int? ?? 100;
+      _players
+        ..clear()
+        ..addAll((data['players'] as List)
+            .map((e) => Player.fromJson(e as Map<String, dynamic>)));
+    });
+  }
+
+  Future<void> _save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        _storeKey,
+        jsonEncode({
+          'defaultBuyIn': _defaultBuyIn,
+          'players': _players.map((p) => p.toJson()).toList(),
+        }));
+  }
+
+  void _update(VoidCallback change) {
+    setState(change);
+    _save();
+  }
+
+  Future<int?> _askAmount(String title, {int? initial}) async {
+    final ctrl = TextEditingController(text: initial?.toString() ?? '');
+    return showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(hintText: 'Amount'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, int.tryParse(ctrl.text)),
+              child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _addPlayer() async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add player'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(hintText: 'Name'),
+          onSubmitted: (v) => Navigator.pop(ctx, v),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text),
+              child: const Text('Add')),
+        ],
+      ),
+    );
+    final trimmed = name?.trim() ?? '';
+    if (trimmed.isEmpty) return;
+    if (_players.any((p) => p.name == trimmed)) {
+      _snack('$trimmed is already in the game');
+      return;
+    }
+    _update(() => _players.add(Player(trimmed, buyIn: _defaultBuyIn)));
+  }
+
+  void _snack(String text) => ScaffoldMessenger.of(context)
+      .showSnackBar(SnackBar(content: Text(text)));
+
+  Future<void> _playerMenu(Player p) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(title: Text(p.name, style: const TextStyle(fontSize: 20))),
+          ListTile(
+              leading: const Icon(Icons.add_circle_outline),
+              title: const Text('Custom buy-in'),
+              onTap: () => Navigator.pop(ctx, 'custom')),
+          ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('Fix total buy-in'),
+              onTap: () => Navigator.pop(ctx, 'fix')),
+          ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Remove player'),
+              onTap: () => Navigator.pop(ctx, 'remove')),
+        ]),
+      ),
+    );
+    if (choice == 'custom') {
+      final a = await _askAmount('Buy-in for ${p.name}');
+      if (a != null && a > 0) _update(() => p.buyIn += a);
+    } else if (choice == 'fix') {
+      final a = await _askAmount('Total buy-in for ${p.name}', initial: p.buyIn);
+      if (a != null) _update(() => p.buyIn = a);
+    } else if (choice == 'remove') {
+      _update(() => _players.remove(p));
+    }
+  }
+
+  Future<void> _newGame() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Start a new game?'),
+        content: const Text('Keep the same players and reset all amounts?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Clear players too')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Keep players')),
+        ],
+      ),
+    );
+    if (ok == null) return;
+    _update(() {
+      if (ok) {
+        for (final p in _players) {
+          p.buyIn = _defaultBuyIn;
+          p.cashOut = null;
+        }
+      } else {
+        _players.clear();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Poker Night'),
+        actions: [
+          IconButton(
+            tooltip: 'Default buy-in',
+            icon: const Icon(Icons.tune),
+            onPressed: () async {
+              final a = await _askAmount('Default buy-in',
+                  initial: _defaultBuyIn);
+              if (a != null && a > 0) _update(() => _defaultBuyIn = a);
+            },
+          ),
+          IconButton(
+              tooltip: 'New game',
+              icon: const Icon(Icons.refresh),
+              onPressed: _newGame),
+        ],
+      ),
+      body: Column(children: [
+        Container(
+          width: double.infinity,
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+              color: scheme.primaryContainer,
+              borderRadius: BorderRadius.circular(20)),
+          child: Column(children: [
+            Text('Total in the pot',
+                style: TextStyle(color: scheme.onPrimaryContainer)),
+            Text('$_pot',
+                style: TextStyle(
+                    fontSize: 44,
+                    fontWeight: FontWeight.bold,
+                    color: scheme.onPrimaryContainer)),
+            Text('${_players.length} players · buy-in $_defaultBuyIn',
+                style: TextStyle(color: scheme.onPrimaryContainer)),
+          ]),
+        ),
+        Expanded(
+          child: _players.isEmpty
+              ? const Center(
+                  child: Text('Tap "Add player" to start',
+                      style: TextStyle(fontSize: 16)))
+              : ListView.builder(
+                  itemCount: _players.length,
+                  itemBuilder: (ctx, i) {
+                    final p = _players[i];
+                    return Card(
+                      margin: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 4),
+                      child: ListTile(
+                        onTap: () => _playerMenu(p),
+                        leading: CircleAvatar(
+                            child: Text(p.name.characters.first.toUpperCase())),
+                        title: Text(p.name,
+                            style: const TextStyle(fontSize: 18)),
+                        subtitle: Text('In: ${p.buyIn}'),
+                        trailing: FilledButton.tonal(
+                          onPressed: () =>
+                              _update(() => p.buyIn += _defaultBuyIn),
+                          child: Text('+$_defaultBuyIn'),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Row(children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _addPlayer,
+                  icon: const Icon(Icons.person_add),
+                  label: const Text('Add player'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _players.length < 2
+                      ? null
+                      : () async {
+                          await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => SettleScreen(
+                                      players: _players, onChanged: _save)));
+                          setState(() {});
+                        },
+                  icon: const Icon(Icons.payments),
+                  label: const Text('Settle up'),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class SettleScreen extends StatefulWidget {
+  final List<Player> players;
+  final VoidCallback onChanged;
+
+  const SettleScreen(
+      {super.key, required this.players, required this.onChanged});
+
+  @override
+  State<SettleScreen> createState() => _SettleScreenState();
+}
+
+class _SettleScreenState extends State<SettleScreen> {
+  late final Map<Player, TextEditingController> _ctrls = {
+    for (final p in widget.players)
+      p: TextEditingController(text: p.cashOut?.toString() ?? '')
+  };
+
+  @override
+  void dispose() {
+    for (final c in _ctrls.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final players = widget.players;
+    final pot = players.fold(0, (s, p) => s + p.buyIn);
+    final allEntered = players.every((p) => p.cashOut != null);
+    final counted = players.fold(0, (s, p) => s + (p.cashOut ?? 0));
+    final diff = counted - pot;
+    final transfers = allEntered && diff == 0
+        ? settle({for (final p in players) p.name: p.cashOut! - p.buyIn})
+        : <Transfer>[];
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settle up')),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        const Text('Enter how many chips each player has at the end.',
+            style: TextStyle(fontSize: 16)),
+        const SizedBox(height: 12),
+        for (final p in players)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(children: [
+              Expanded(
+                flex: 3,
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(p.name, style: const TextStyle(fontSize: 18)),
+                      Text('In: ${p.buyIn}'
+                          '${p.cashOut == null ? '' : '   Net: ${_signed(p.cashOut! - p.buyIn)}'}'),
+                    ]),
+              ),
+              Expanded(
+                flex: 2,
+                child: TextField(
+                  controller: _ctrls[p],
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                      labelText: 'Chips out', border: OutlineInputBorder()),
+                  onChanged: (v) {
+                    setState(() => p.cashOut = int.tryParse(v));
+                    widget.onChanged();
+                  },
+                ),
+              ),
+            ]),
+          ),
+        const SizedBox(height: 16),
+        if (!allEntered)
+          const Text('Waiting for every player\'s chip count.')
+        else if (diff != 0)
+          Card(
+            color: scheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Chips don\'t match the pot. Counted $counted but $pot went in '
+                '(${diff > 0 ? '$diff too many' : '${-diff} missing'}).',
+                style: TextStyle(color: scheme.onErrorContainer),
+              ),
+            ),
+          )
+        else ...[
+          Text('Payments', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          if (transfers.isEmpty) const Text('Everyone is even. Nobody pays.'),
+          for (final t in transfers)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.arrow_forward),
+                title: Text('${t.from} pays ${t.to}'),
+                trailing: Text('${t.amount}',
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold)),
+              ),
+            ),
+        ],
+      ]),
+    );
+  }
+
+  String _signed(int v) => v > 0 ? '+$v' : '$v';
+}
