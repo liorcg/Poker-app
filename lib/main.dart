@@ -33,14 +33,19 @@ class Player {
   int buyIn;
   int? cashOut;
 
-  Player(this.name, {this.buyIn = 0, this.cashOut});
+  /// Money the player has overall, updated after every settle up.
+  int balance;
+
+  Player(this.name, {this.buyIn = 0, this.cashOut, this.balance = 0});
 
   Map<String, dynamic> toJson() =>
-      {'name': name, 'buyIn': buyIn, 'cashOut': cashOut};
+      {'name': name, 'buyIn': buyIn, 'cashOut': cashOut, 'balance': balance};
 
-  factory Player.fromJson(Map<String, dynamic> j) =>
+  factory Player.fromJson(Map<String, dynamic> j, {int startingMoney = 0}) =>
       Player(j['name'] as String,
-          buyIn: j['buyIn'] as int, cashOut: j['cashOut'] as int?);
+          buyIn: j['buyIn'] as int,
+          cashOut: j['cashOut'] as int?,
+          balance: j['balance'] as int? ?? startingMoney);
 }
 
 const _storeKey = 'game_v1';
@@ -55,6 +60,7 @@ class GameScreen extends StatefulWidget {
 class _GameScreenState extends State<GameScreen> {
   final List<Player> _players = [];
   int _defaultBuyIn = 100;
+  int _startingMoney = 1000;
 
   int get _pot => _players.fold(0, (s, p) => s + p.buyIn);
 
@@ -71,10 +77,12 @@ class _GameScreenState extends State<GameScreen> {
     final data = jsonDecode(raw) as Map<String, dynamic>;
     setState(() {
       _defaultBuyIn = data['defaultBuyIn'] as int? ?? 100;
+      _startingMoney = data['startingMoney'] as int? ?? 1000;
       _players
         ..clear()
         ..addAll((data['players'] as List)
-            .map((e) => Player.fromJson(e as Map<String, dynamic>)));
+            .map((e) => Player.fromJson(e as Map<String, dynamic>,
+                startingMoney: _startingMoney)));
     });
   }
 
@@ -84,6 +92,7 @@ class _GameScreenState extends State<GameScreen> {
         _storeKey,
         jsonEncode({
           'defaultBuyIn': _defaultBuyIn,
+          'startingMoney': _startingMoney,
           'players': _players.map((p) => p.toJson()).toList(),
         }));
   }
@@ -145,7 +154,8 @@ class _GameScreenState extends State<GameScreen> {
       _snack('$trimmed is already in the game');
       return;
     }
-    _update(() => _players.add(Player(trimmed, buyIn: _defaultBuyIn)));
+    _update(() => _players.add(Player(trimmed,
+        buyIn: _defaultBuyIn, balance: _startingMoney)));
   }
 
   void _snack(String text) => ScaffoldMessenger.of(context)
@@ -181,6 +191,51 @@ class _GameScreenState extends State<GameScreen> {
     } else if (choice == 'remove') {
       _update(() => _players.remove(p));
     }
+  }
+
+  Future<void> _settingsAction(String action) async {
+    if (action == 'buyin') {
+      final a = await _askAmount('Default buy-in', initial: _defaultBuyIn);
+      if (a != null && a > 0) _update(() => _defaultBuyIn = a);
+    } else if (action == 'start') {
+      final a = await _askAmount('Starting money for new players',
+          initial: _startingMoney);
+      if (a != null && a > 0) _update(() => _startingMoney = a);
+    } else if (action == 'reset') {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Reset everyone\'s money?'),
+          content: Text('Every player goes back to $_startingMoney.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Reset')),
+          ],
+        ),
+      );
+      if (ok == true) {
+        _update(() {
+          for (final p in _players) {
+            p.balance = _startingMoney;
+          }
+        });
+      }
+    }
+  }
+
+  /// Adds each player's win or loss to their money and starts the next round.
+  void _finishRound() {
+    _update(() {
+      for (final p in _players) {
+        p.balance += (p.cashOut ?? p.buyIn) - p.buyIn;
+        p.buyIn = _defaultBuyIn;
+        p.cashOut = null;
+      }
+    });
   }
 
   Future<void> _newGame() async {
@@ -221,14 +276,15 @@ class _GameScreenState extends State<GameScreen> {
       appBar: AppBar(
         title: const Text('Poker Night'),
         actions: [
-          IconButton(
-            tooltip: 'Default buy-in',
+          PopupMenuButton<String>(
             icon: const Icon(Icons.tune),
-            onPressed: () async {
-              final a = await _askAmount('Default buy-in',
-                  initial: _defaultBuyIn);
-              if (a != null && a > 0) _update(() => _defaultBuyIn = a);
-            },
+            onSelected: _settingsAction,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'buyin', child: Text('Default buy-in')),
+              PopupMenuItem(value: 'start', child: Text('Starting money')),
+              PopupMenuItem(
+                  value: 'reset', child: Text('Reset everyone\'s money')),
+            ],
           ),
           IconButton(
               tooltip: 'New game',
@@ -274,7 +330,7 @@ class _GameScreenState extends State<GameScreen> {
                             child: Text(p.name.characters.first.toUpperCase())),
                         title: Text(p.name,
                             style: const TextStyle(fontSize: 18)),
-                        subtitle: Text('In: ${p.buyIn}'),
+                        subtitle: Text('Money: ${p.balance}   In: ${p.buyIn}'),
                         trailing: FilledButton.tonal(
                           onPressed: () =>
                               _update(() => p.buyIn += _defaultBuyIn),
@@ -306,7 +362,9 @@ class _GameScreenState extends State<GameScreen> {
                               context,
                               MaterialPageRoute(
                                   builder: (_) => SettleScreen(
-                                      players: _players, onChanged: _save)));
+                                      players: _players,
+                                      onChanged: _save,
+                                      onFinish: _finishRound)));
                           setState(() {});
                         },
                   icon: const Icon(Icons.payments),
@@ -324,9 +382,13 @@ class _GameScreenState extends State<GameScreen> {
 class SettleScreen extends StatefulWidget {
   final List<Player> players;
   final VoidCallback onChanged;
+  final VoidCallback onFinish;
 
   const SettleScreen(
-      {super.key, required this.players, required this.onChanged});
+      {super.key,
+      required this.players,
+      required this.onChanged,
+      required this.onFinish});
 
   @override
   State<SettleScreen> createState() => _SettleScreenState();
@@ -374,7 +436,7 @@ class _SettleScreenState extends State<SettleScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(p.name, style: const TextStyle(fontSize: 18)),
-                      Text('In: ${p.buyIn}'
+                      Text('Money: ${p.balance}   In: ${p.buyIn}'
                           '${p.cashOut == null ? '' : '   Net: ${_signed(p.cashOut! - p.buyIn)}'}'),
                     ]),
               ),
@@ -423,9 +485,50 @@ class _SettleScreenState extends State<SettleScreen> {
                         fontSize: 20, fontWeight: FontWeight.bold)),
               ),
             ),
+          const SizedBox(height: 16),
+          Text('Money after this game',
+              style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          for (final p in players)
+            ListTile(
+              dense: true,
+              title: Text(p.name, style: const TextStyle(fontSize: 16)),
+              subtitle: Text('${p.balance} ${_signed(p.cashOut! - p.buyIn)}'),
+              trailing: Text('${p.balance + p.cashOut! - p.buyIn}',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold)),
+            ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: () => _confirmFinish(context),
+            icon: const Icon(Icons.check),
+            label: const Text('Finish game & update money'),
+          ),
         ],
       ]),
     );
+  }
+
+  Future<void> _confirmFinish(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Finish this game?'),
+        content: const Text(
+            'Wins are added and losses are taken from each player\'s money. '
+            'Buy-ins reset for the next game.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Finish')),
+        ],
+      ),
+    );
+    if (ok != true || !context.mounted) return;
+    widget.onFinish();
+    Navigator.pop(context);
   }
 
   String _signed(int v) => v > 0 ? '+$v' : '$v';
